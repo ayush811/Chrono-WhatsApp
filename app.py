@@ -9,8 +9,13 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
+
 def parse_event(message):
+    from datetime import date
+    today = date.today().strftime("%Y-%m-%d")
+
     prompt = f"""
+    Today's date is {today}. Use this to resolve relative dates like "tomorrow", "next Friday", "this weekend" etc.
     Extract calendar event details from this message and return ONLY a JSON object with these fields:
     - title
     - date (YYYY-MM-DD format)
