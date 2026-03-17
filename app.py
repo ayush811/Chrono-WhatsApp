@@ -24,6 +24,8 @@ def parse_event(message):
     """
     body = {"contents": [{"parts": [{"text": prompt}]}]}
     response = requests.post(GEMINI_URL, json=body)
+    print(f"Gemini status: {response.status_code}")
+    print(f"Gemini response: {response.text}")
     raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
     raw = raw.strip().replace("```json", "").replace("```", "")
     return json.loads(raw)
