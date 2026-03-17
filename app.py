@@ -1,27 +1,60 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
 import requests
 import os
 import json
+import pickle
+from datetime import date
 
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
+def get_calendar_service():
+    with open("token.pickle", "rb") as token:
+        creds = pickle.load(token)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+    return build("calendar", "v3", credentials=creds)
+
+def create_calendar_event(event):
+    service = get_calendar_service()
+
+    start = event["date"]
+    if event.get("time"):
+        start_dt = f"{event['date']}T{event['time']}:00"
+        end_dt = f"{event['date']}T{event['time']}:00"
+        time_obj = {"dateTime": start_dt, "timeZone": "America/Indiana/Indianapolis"}
+        end_obj = {"dateTime": end_dt, "timeZone": "America/Indiana/Indianapolis"}
+    else:
+        time_obj = {"date": start}
+        end_obj = {"date": start}
+
+    body = {
+        "summary": event["title"],
+        "location": event.get("location", ""),
+        "description": event.get("description", ""),
+        "start": time_obj,
+        "end": end_obj,
+    }
+
+    created = service.events().insert(calendarId="primary", body=body).execute()
+    return created.get("htmlLink")
 
 def parse_event(message):
-    from datetime import date
     today = date.today().strftime("%Y-%m-%d")
-
     prompt = f"""
     Today's date is {today}. Use this to resolve relative dates like "tomorrow", "next Friday", "this weekend" etc.
+
     Extract calendar event details from this message and return ONLY a JSON object with these fields:
     - title
     - date (YYYY-MM-DD format)
     - time (HH:MM 24hr format, null if not mentioned)
     - location (null if not mentioned)
-    - description (any extra details from the message like dress code, what to bring, contact info, vibe etc. null if nothing extra mentioned)
+    - description (any extra details like dress code, what to bring, contact info, vibe etc. null if nothing extra)
 
     If this message doesn't seem like an event invitation, return {{"error": "not an event"}}.
 
@@ -46,17 +79,18 @@ def webhook():
         if "error" in event:
             resp.message("That doesn't look like an event. Try sending an invitation or event details!")
         else:
+            link = create_calendar_event(event)
             reply = (
-                f"📅 Got it! Here's what I extracted:\n"
+                f"✅ Added to your calendar!\n"
                 f"*{event['title']}*\n"
                 f"📆 {event['date']}\n"
                 f"⏰ {event.get('time', 'No time specified')}\n"
                 f"📍 {event.get('location', 'No location')}\n"
-                f"📝 {event.get('description', '')}"
+                f"🔗 {link}"
             )
             resp.message(reply)
     except Exception as e:
-        resp.message("Sorry, something went wrong parsing that. Try again!")
+        resp.message("Sorry, something went wrong. Try again!")
         print(f"Error: {e}")
 
     return str(resp)
