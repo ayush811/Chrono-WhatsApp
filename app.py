@@ -6,12 +6,16 @@ import requests
 import os
 import json
 import pickle
-from datetime import date
+from datetime import date, datetime, timedelta
 
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+TIMEZONE = "America/Indiana/Indianapolis"
+
+# Stores last event ID per user phone number
+user_last_event = {}
 
 def get_calendar_service():
     with open("token.pickle", "rb") as token:
@@ -23,26 +27,38 @@ def get_calendar_service():
 def create_calendar_event(event):
     service = get_calendar_service()
 
-    start = event["date"]
-    if event.get("time"):
-        start_dt = f"{event['date']}T{event['time']}:00"
-        end_dt = f"{event['date']}T{event['time']}:00"
-        time_obj = {"dateTime": start_dt, "timeZone": "America/Indiana/Indianapolis"}
-        end_obj = {"dateTime": end_dt, "timeZone": "America/Indiana/Indianapolis"}
+    if event.get("start_time"):
+        start_dt = f"{event['date']}T{event['start_time']}:00"
+
+        # If end time specified use it, otherwise default to 1 hour later
+        if event.get("end_time"):
+            end_dt = f"{event['date']}T{event['end_time']}:00"
+        else:
+            start_obj = datetime.fromisoformat(start_dt)
+            end_obj = start_obj + timedelta(hours=1)
+            end_dt = end_obj.isoformat()
+
+        time_obj = {"dateTime": start_dt, "timeZone": TIMEZONE}
+        end_time_obj = {"dateTime": end_dt, "timeZone": TIMEZONE}
     else:
-        time_obj = {"date": start}
-        end_obj = {"date": start}
+        # All day event if no time mentioned
+        time_obj = {"date": event["date"]}
+        end_time_obj = {"date": event["date"]}
 
     body = {
         "summary": event["title"],
         "location": event.get("location", ""),
         "description": event.get("description", ""),
         "start": time_obj,
-        "end": end_obj,
+        "end": end_time_obj,
     }
 
     created = service.events().insert(calendarId="primary", body=body).execute()
-    return created.get("htmlLink")
+    return created.get("id"), created.get("htmlLink")
+
+def delete_calendar_event(event_id):
+    service = get_calendar_service()
+    service.events().delete(calendarId="primary", eventId=event_id).execute()
 
 def parse_event(message):
     today = date.today().strftime("%Y-%m-%d")
@@ -52,7 +68,8 @@ def parse_event(message):
     Extract calendar event details from this message and return ONLY a JSON object with these fields:
     - title
     - date (YYYY-MM-DD format)
-    - time (HH:MM 24hr format, null if not mentioned)
+    - start_time (HH:MM 24hr format, null if not mentioned)
+    - end_time (HH:MM 24hr format, null if not mentioned)
     - location (null if not mentioned)
     - description (any extra details like dress code, what to bring, contact info, vibe etc. null if nothing extra)
 
@@ -70,23 +87,46 @@ def parse_event(message):
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    incoming_msg = request.form.get("Body")
+    incoming_msg = request.form.get("Body", "").strip()
+    sender = request.form.get("From")
     resp = MessagingResponse()
 
+    # Handle delete command
+    if incoming_msg.lower() in ["delete", "delete event", "remove", "cancel"]:
+        if sender in user_last_event:
+            try:
+                delete_calendar_event(user_last_event[sender])
+                del user_last_event[sender]
+                resp.message("🗑️ Event deleted from your calendar!")
+            except Exception as e:
+                print(f"Delete error: {e}")
+                resp.message("Couldn't delete the event. It may have already been removed.")
+        else:
+            resp.message("No recent event found to delete!")
+        return str(resp)
+
+    # Handle event creation
     try:
         event = parse_event(incoming_msg)
 
         if "error" in event:
             resp.message("That doesn't look like an event. Try sending an invitation or event details!")
         else:
-            link = create_calendar_event(event)
+            event_id, link = create_calendar_event(event)
+            user_last_event[sender] = event_id
+
+            end_display = event.get("end_time", "")
+            time_display = f"{event.get('start_time', 'No time')} - {end_display if end_display else '+1hr'}" if event.get("start_time") else "All day"
+
             reply = (
                 f"✅ Added to your calendar!\n"
+                f"\n"
                 f"*{event['title']}*\n"
                 f"📆 {event['date']}\n"
-                f"⏰ {event.get('time', 'No time specified')}\n"
-                f"📍 {event.get('location', 'No location')}\n"
-                f"🔗 {link}"
+                f"⏰ {time_display}\n"
+                f"📍 {event.get('location') or 'No location'}\n"
+                f"🔗 {link}\n\n"
+                f"Reply *delete* to remove it."
             )
             resp.message(reply)
     except Exception as e:
