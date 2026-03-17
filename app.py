@@ -1,5 +1,6 @@
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.rest import Client
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 import requests
@@ -14,8 +15,8 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 TIMEZONE = "America/Indiana/Indianapolis"
 
-# Stores last event ID per user phone number
 user_last_event = {}
+message_event_map = {}
 
 def get_calendar_service():
     with open("token.pickle", "rb") as token:
@@ -29,8 +30,6 @@ def create_calendar_event(event):
 
     if event.get("start_time"):
         start_dt = f"{event['date']}T{event['start_time']}:00"
-
-        # If end time specified use it, otherwise default to 1 hour later
         if event.get("end_time"):
             end_dt = f"{event['date']}T{event['end_time']}:00"
         else:
@@ -41,7 +40,6 @@ def create_calendar_event(event):
         time_obj = {"dateTime": start_dt, "timeZone": TIMEZONE}
         end_time_obj = {"dateTime": end_dt, "timeZone": TIMEZONE}
     else:
-        # All day event if no time mentioned
         time_obj = {"date": event["date"]}
         end_time_obj = {"date": event["date"]}
 
@@ -89,23 +87,28 @@ def parse_event(message):
 def webhook():
     incoming_msg = request.form.get("Body", "").strip()
     sender = request.form.get("From")
+    original_replied_sid = request.form.get("OriginalRepliedMessageSid")
     resp = MessagingResponse()
 
-    # Handle delete command
-    if incoming_msg.lower() in ["delete", "delete event", "remove", "cancel"]:
-        if sender in user_last_event:
+    if incoming_msg.lower() in ["delete", "remove", "cancel"]:
+        event_id = None
+
+        if original_replied_sid and original_replied_sid in message_event_map:
+            event_id = message_event_map[original_replied_sid]
+        elif sender in user_last_event:
+            event_id = user_last_event[sender]
+
+        if event_id:
             try:
-                delete_calendar_event(user_last_event[sender])
-                del user_last_event[sender]
+                delete_calendar_event(event_id)
                 resp.message("🗑️ Event deleted from your calendar!")
             except Exception as e:
                 print(f"Delete error: {e}")
-                resp.message("Couldn't delete the event. It may have already been removed.")
+                resp.message("Couldn't delete. It may have already been removed.")
         else:
-            resp.message("No recent event found to delete!")
+            resp.message("No event found to delete!")
         return str(resp)
 
-    # Handle event creation
     try:
         event = parse_event(incoming_msg)
 
@@ -118,9 +121,8 @@ def webhook():
             end_display = event.get("end_time", "")
             time_display = f"{event.get('start_time', 'No time')} - {end_display if end_display else '+1hr'}" if event.get("start_time") else "All day"
 
-            reply = (
+            reply_text = (
                 f"✅ Added to your calendar!\n"
-                f"\n"
                 f"*{event['title']}*\n"
                 f"📆 {event['date']}\n"
                 f"⏰ {time_display}\n"
@@ -128,7 +130,17 @@ def webhook():
                 f"🔗 {link}\n\n"
                 f"Reply *delete* to remove it."
             )
-            resp.message(reply)
+
+            resp.message(reply_text)
+
+            account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+            auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+            if account_sid and auth_token:
+                client = Client(account_sid, auth_token)
+                messages = client.messages.list(to=sender, limit=1)
+                if messages:
+                    message_event_map[messages[0].sid] = event_id
+
     except Exception as e:
         resp.message("Sorry, something went wrong. Try again!")
         print(f"Error: {e}")
