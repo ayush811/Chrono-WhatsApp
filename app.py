@@ -16,7 +16,7 @@ def parse_event(message):
     - date (YYYY-MM-DD format)
     - time (HH:MM 24hr format, null if not mentioned)
     - location (null if not mentioned)
-    - description (brief summary)
+    - description (any extra details from the message like dress code, what to bring, contact info, vibe etc. null if nothing extra mentioned)
 
     If this message doesn't seem like an event invitation, return {{"error": "not an event"}}.
 
