@@ -17,6 +17,7 @@ TIMEZONE = "America/Indiana/Indianapolis"
 
 user_last_event = {}
 message_event_map = {}
+event_details_map = {}  # stores event details by event_id for delete confirmation
 
 def get_calendar_service():
     with open("token.pickle", "rb") as token:
@@ -101,8 +102,18 @@ def webhook():
 
         if event_id:
             try:
+                # Grab details before deleting
+                details = event_details_map.get(event_id, {})
                 delete_calendar_event(event_id)
-                resp.message("🗑️ Event deleted from your calendar!")
+
+                reply = (
+                    f"🗑️ Deleted from your calendar!\n"
+                    f"*{details.get('title', 'Event')}*\n"
+                    f"📆 {details.get('date', '')}\n"
+                    f"⏰ {details.get('time_display', 'No time')}\n"
+                    f"📍 {details.get('location') or 'No location'}"
+                )
+                resp.message(reply)
             except Exception as e:
                 print(f"Delete error: {e}")
                 resp.message("Couldn't delete. It may have already been removed.")
@@ -122,6 +133,14 @@ def webhook():
             end_display = event.get("end_time", "")
             time_display = f"{event.get('start_time', 'No time')} - {end_display if end_display else '+1hr'}" if event.get("start_time") else "All day"
 
+            # Store event details for delete confirmation
+            event_details_map[event_id] = {
+                "title": event["title"],
+                "date": event["date"],
+                "time_display": time_display,
+                "location": event.get("location")
+            }
+
             reply_text = (
                 f"✅ Added to your calendar!\n"
                 f"*{event['title']}*\n"
@@ -132,15 +151,16 @@ def webhook():
                 f"Reply *delete* to remove it."
             )
 
-            resp.message(reply_text)
-
             account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
             auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
-            if account_sid and auth_token:
-                client = Client(account_sid, auth_token)
-                messages = client.messages.list(to=sender, limit=1)
-                if messages:
-                    message_event_map[messages[0].sid] = event_id
+            client = Client(account_sid, auth_token)
+            sent_msg = client.messages.create(
+                from_="whatsapp:+14155238886",
+                to=sender,
+                body=reply_text
+            )
+            message_event_map[sent_msg.sid] = event_id
+            print(f"Stored mapping: {sent_msg.sid} -> {event_id}")
 
     except Exception as e:
         resp.message("Sorry, something went wrong. Try again!")
