@@ -132,6 +132,15 @@ def parse_events_from_image(image_url):
     raw = raw.strip().replace("```json", "").replace("```", "")
     return json.loads(raw)
 
+def format_event_block(event, link, time_display):
+    return (
+        f"*{event['title']}*\n"
+        f"📆 {format_date(event['date'])}\n"
+        f"⏰ {time_display}\n"
+        f"📍 {event.get('location') or 'No location'}\n"
+        f"🔗 {link}"
+    )
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     print(f"ALL PARAMS: {request.form}")
@@ -178,7 +187,7 @@ def webhook():
                 resp.message("That image doesn't seem to have any event details!")
                 return str(resp)
 
-            added = []
+            blocks = []
             last_event_id = None
             for event in events:
                 if not event.get("date"):
@@ -187,7 +196,7 @@ def webhook():
                 last_event_id = event_id
 
                 end_display = event.get("end_time", "")
-                time_display = f"{event.get('start_time')} - {end_display}" if event.get("start_time") and end_display else f"{event.get('start_time')}+1hr" if event.get("start_time") else "All day"
+                time_display = f"{event.get('start_time')} - {end_display}" if event.get("start_time") and end_display else f"{event.get('start_time')} +1hr" if event.get("start_time") else "All day"
 
                 event_details_map[event_id] = {
                     "title": event["title"],
@@ -195,11 +204,12 @@ def webhook():
                     "time_display": time_display,
                     "location": event.get("location")
                 }
-                added.append(f"• {event['title']} — {format_date(event['date'])} {event.get('start_time', '')}")
+                blocks.append(format_event_block(event, link, time_display))
 
             user_last_event[sender] = last_event_id
 
-            reply_text = f"✅ Added {len(added)} events to your calendar!\n\n" + "\n".join(added)
+            divider = "\n➖➖➖➖➖➖➖➖\n"
+            reply_text = f"✅ Added {len(blocks)} event{'s' if len(blocks) > 1 else ''} to your calendar!\n\n" + divider.join(blocks)
 
             account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
             auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
@@ -234,12 +244,8 @@ def webhook():
                 }
 
                 reply_text = (
-                    f"✅ Added to your calendar!\n"
-                    f"*{event['title']}*\n"
-                    f"📆 {format_date(event['date'])}\n"
-                    f"⏰ {time_display}\n"
-                    f"📍 {event.get('location') or 'No location'}\n"
-                    f"🔗 {link}\n\n"
+                    f"✅ Added to your calendar!\n\n"
+                    f"{format_event_block(event, link, time_display)}\n\n"
                     f"Reply *delete* to remove it."
                 )
 
