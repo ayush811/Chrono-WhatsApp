@@ -20,6 +20,9 @@ user_last_event = {}
 message_event_map = {}
 event_details_map = {}
 
+def format_date(date_str):
+    return datetime.strptime(date_str, "%Y-%m-%d").strftime("%d %b %Y")
+
 def get_calendar_service():
     with open("token.pickle", "rb") as token:
         creds = pickle.load(token)
@@ -64,6 +67,7 @@ def parse_event(message):
     today = date.today().strftime("%Y-%m-%d")
     prompt = f"""
     Today's date is {today}. Use this to resolve relative dates like "tomorrow", "next Friday", "this weekend" etc.
+    If no month is specified, assume the current month and year.
 
     Extract calendar event details from this message and return ONLY a JSON object with these fields:
     - title
@@ -85,7 +89,7 @@ def parse_event(message):
     raw = raw.strip().replace("```json", "").replace("```", "")
     return json.loads(raw)
 
-def parse_event_from_image(image_url):
+def parse_events_from_image(image_url):
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
 
@@ -95,9 +99,11 @@ def parse_event_from_image(image_url):
 
     today = date.today().strftime("%Y-%m-%d")
     prompt = f"""
-    Today's date is {today}. Use this to resolve relative dates.
+    Today's date is {today}.
+    If no year is specified, assume the current year.
+    If no month is specified, assume the current month.
 
-    Extract calendar event details from this image and return ONLY a JSON object with these fields:
+    This image may contain one or multiple events. Extract ALL events and return ONLY a JSON array where each item has:
     - title
     - date (YYYY-MM-DD format)
     - start_time (HH:MM 24hr format, null if not mentioned)
@@ -105,7 +111,9 @@ def parse_event_from_image(image_url):
     - location (null if not mentioned)
     - description (any extra details like dress code, what to bring, contact info, vibe etc. null if nothing extra)
 
-    If this image doesn't contain event details, return {{"error": "not an event"}}.
+    If the image contains no event details at all, return [{{"error": "not an event"}}].
+
+    Return ONLY the JSON array, no other text.
     """
 
     body = {
@@ -147,7 +155,7 @@ def webhook():
                 reply = (
                     f"🗑️ Deleted from your calendar!\n"
                     f"*{details.get('title', 'Event')}*\n"
-                    f"📆 {details.get('date', '')}\n"
+                    f"📆 {format_date(details['date']) if details.get('date') else ''}\n"
                     f"⏰ {details.get('time_display', 'No time')}\n"
                     f"📍 {details.get('location') or 'No location'}"
                 )
@@ -164,35 +172,34 @@ def webhook():
 
         if num_media > 0:
             image_url = request.form.get("MediaUrl0")
-            event = parse_event_from_image(image_url)
-        else:
-            event = parse_event(incoming_msg)
+            events = parse_events_from_image(image_url)
 
-        if "error" in event:
-            resp.message("That doesn't look like an event. Try sending an invitation or event details!")
-        else:
-            event_id, link = create_calendar_event(event)
-            user_last_event[sender] = event_id
+            if not events or "error" in events[0]:
+                resp.message("That image doesn't seem to have any event details!")
+                return str(resp)
 
-            end_display = event.get("end_time", "")
-            time_display = f"{event.get('start_time', 'No time')} - {end_display if end_display else '+1hr'}" if event.get("start_time") else "All day"
+            added = []
+            last_event_id = None
+            for event in events:
+                if not event.get("date"):
+                    continue
+                event_id, link = create_calendar_event(event)
+                last_event_id = event_id
 
-            event_details_map[event_id] = {
-                "title": event["title"],
-                "date": event["date"],
-                "time_display": time_display,
-                "location": event.get("location")
-            }
+                end_display = event.get("end_time", "")
+                time_display = f"{event.get('start_time')} - {end_display}" if event.get("start_time") and end_display else f"{event.get('start_time')}+1hr" if event.get("start_time") else "All day"
 
-            reply_text = (
-                f"✅ Added to your calendar!\n"
-                f"*{event['title']}*\n"
-                f"📆 {event['date']}\n"
-                f"⏰ {time_display}\n"
-                f"📍 {event.get('location') or 'No location'}\n"
-                f"🔗 {link}\n\n"
-                f"Reply *delete* to remove it."
-            )
+                event_details_map[event_id] = {
+                    "title": event["title"],
+                    "date": event["date"],
+                    "time_display": time_display,
+                    "location": event.get("location")
+                }
+                added.append(f"• {event['title']} — {format_date(event['date'])} {event.get('start_time', '')}")
+
+            user_last_event[sender] = last_event_id
+
+            reply_text = f"✅ Added {len(added)} events to your calendar!\n\n" + "\n".join(added)
 
             account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
             auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
@@ -202,8 +209,50 @@ def webhook():
                 to=sender,
                 body=reply_text
             )
-            message_event_map[sent_msg.sid] = event_id
-            print(f"Stored mapping: {sent_msg.sid} -> {event_id}")
+            if last_event_id:
+                message_event_map[sent_msg.sid] = last_event_id
+
+        else:
+            event = parse_event(incoming_msg)
+
+            if "error" in event:
+                resp.message("That doesn't look like an event. Try sending an invitation or event details!")
+            elif not event.get("date"):
+                resp.message("Couldn't figure out the date. Can you include the date in your message?")
+            else:
+                event_id, link = create_calendar_event(event)
+                user_last_event[sender] = event_id
+
+                end_display = event.get("end_time", "")
+                time_display = f"{event.get('start_time', 'No time')} - {end_display if end_display else '+1hr'}" if event.get("start_time") else "All day"
+
+                event_details_map[event_id] = {
+                    "title": event["title"],
+                    "date": event["date"],
+                    "time_display": time_display,
+                    "location": event.get("location")
+                }
+
+                reply_text = (
+                    f"✅ Added to your calendar!\n"
+                    f"*{event['title']}*\n"
+                    f"📆 {format_date(event['date'])}\n"
+                    f"⏰ {time_display}\n"
+                    f"📍 {event.get('location') or 'No location'}\n"
+                    f"🔗 {link}\n\n"
+                    f"Reply *delete* to remove it."
+                )
+
+                account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+                auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+                client = Client(account_sid, auth_token)
+                sent_msg = client.messages.create(
+                    from_="whatsapp:+14155238886",
+                    to=sender,
+                    body=reply_text
+                )
+                message_event_map[sent_msg.sid] = event_id
+                print(f"Stored mapping: {sent_msg.sid} -> {event_id}")
 
     except Exception as e:
         resp.message("Sorry, something went wrong. Try again!")
