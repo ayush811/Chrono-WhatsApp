@@ -24,8 +24,9 @@ def format_date(date_str):
     return datetime.strptime(date_str, "%Y-%m-%d").strftime("%d %b %Y")
 
 def get_calendar_service():
-    with open("token.pickle", "rb") as token:
-        creds = pickle.load(token)
+    token_b64 = os.environ.get("GOOGLE_TOKEN")
+    token_bytes = base64.b64decode(token_b64)
+    creds = pickle.loads(token_bytes)
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
     return build("calendar", "v3", credentials=creds)
