@@ -117,7 +117,7 @@ def parse_events_from_image(image_url):
     - location (null if not mentioned)
     - description (any extra details like dress code, what to bring, contact info, vibe etc. null if nothing extra)
 
-    If the image contains no event details at all, return [{{"error": "not an event"}}].
+    If this message contains ANY time-based activity, appointment, reminder, or plan — even a personal one — extract it as an event. Only return {{"error": "not an event"}} if the message has absolutely no time or date reference at all.
 
     Return ONLY the JSON array, no other text.
     """
