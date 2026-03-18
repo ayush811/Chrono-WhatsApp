@@ -7,6 +7,7 @@ import requests
 import os
 import json
 import pickle
+import base64
 from datetime import date, datetime, timedelta
 
 app = Flask(__name__)
@@ -17,7 +18,7 @@ TIMEZONE = "America/Indiana/Indianapolis"
 
 user_last_event = {}
 message_event_map = {}
-event_details_map = {}  # stores event details by event_id for delete confirmation
+event_details_map = {}
 
 def get_calendar_service():
     with open("token.pickle", "rb") as token:
@@ -84,6 +85,45 @@ def parse_event(message):
     raw = raw.strip().replace("```json", "").replace("```", "")
     return json.loads(raw)
 
+def parse_event_from_image(image_url):
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
+
+    image_response = requests.get(image_url, auth=(account_sid, auth_token))
+    image_base64 = base64.b64encode(image_response.content).decode("utf-8")
+    mime_type = image_response.headers.get("Content-Type", "image/jpeg")
+
+    today = date.today().strftime("%Y-%m-%d")
+    prompt = f"""
+    Today's date is {today}. Use this to resolve relative dates.
+
+    Extract calendar event details from this image and return ONLY a JSON object with these fields:
+    - title
+    - date (YYYY-MM-DD format)
+    - start_time (HH:MM 24hr format, null if not mentioned)
+    - end_time (HH:MM 24hr format, null if not mentioned)
+    - location (null if not mentioned)
+    - description (any extra details like dress code, what to bring, contact info, vibe etc. null if nothing extra)
+
+    If this image doesn't contain event details, return {{"error": "not an event"}}.
+    """
+
+    body = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime_type, "data": image_base64}}
+            ]
+        }]
+    }
+
+    response = requests.post(GEMINI_URL, json=body)
+    print(f"Gemini image status: {response.status_code}")
+    print(f"Gemini image response: {response.text}")
+    raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    raw = raw.strip().replace("```json", "").replace("```", "")
+    return json.loads(raw)
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     print(f"ALL PARAMS: {request.form}")
@@ -102,10 +142,8 @@ def webhook():
 
         if event_id:
             try:
-                # Grab details before deleting
                 details = event_details_map.get(event_id, {})
                 delete_calendar_event(event_id)
-
                 reply = (
                     f"🗑️ Deleted from your calendar!\n"
                     f"*{details.get('title', 'Event')}*\n"
@@ -122,7 +160,13 @@ def webhook():
         return str(resp)
 
     try:
-        event = parse_event(incoming_msg)
+        num_media = int(request.form.get("NumMedia", 0))
+
+        if num_media > 0:
+            image_url = request.form.get("MediaUrl0")
+            event = parse_event_from_image(image_url)
+        else:
+            event = parse_event(incoming_msg)
 
         if "error" in event:
             resp.message("That doesn't look like an event. Try sending an invitation or event details!")
@@ -133,7 +177,6 @@ def webhook():
             end_display = event.get("end_time", "")
             time_display = f"{event.get('start_time', 'No time')} - {end_display if end_display else '+1hr'}" if event.get("start_time") else "All day"
 
-            # Store event details for delete confirmation
             event_details_map[event_id] = {
                 "title": event["title"],
                 "date": event["date"],
