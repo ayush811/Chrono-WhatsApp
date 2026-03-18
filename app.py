@@ -87,8 +87,13 @@ def parse_event(message):
     print(f"Gemini status: {response.status_code}")
     print(f"Gemini response: {response.text}")
     raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-    raw = raw.strip().replace("```json", "").replace("```", "")
-    return json.loads(raw)
+    raw = raw.strip().replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"JSON parse error: {e}")
+        print(f"Raw was: {raw}")
+        return {"error": "parse failed"}
 
 def parse_events_from_image(image_url):
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
@@ -130,8 +135,13 @@ def parse_events_from_image(image_url):
     print(f"Gemini image status: {response.status_code}")
     print(f"Gemini image response: {response.text}")
     raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-    raw = raw.strip().replace("```json", "").replace("```", "")
-    return json.loads(raw)
+    raw = raw.strip().replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"JSON parse error: {e}")
+        print(f"Raw was: {raw}")
+        return [{"error": "parse failed"}]
 
 def format_event_block(event, link, time_display):
     return (
