@@ -85,6 +85,7 @@ def parse_event(message):
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    print(f"ALL PARAMS: {request.form}")
     incoming_msg = request.form.get("Body", "").strip()
     sender = request.form.get("From")
     original_replied_sid = request.form.get("OriginalRepliedMessageSid")
