@@ -70,6 +70,8 @@ def find_event_on_calendar(title=None, date_str=None):
         kwargs["q"] = title
     results = service.events().list(**kwargs).execute()
     items = results.get("items", [])
+    # Skip birthday and other special event types that can't be modified/deleted
+    items = [e for e in items if e.get("eventType", "default") == "default"]
     return items[0] if items else None
 
 def detect_intent(message):
@@ -256,6 +258,9 @@ def webhook():
             print(f"Error: {e}")
         return str(resp)
 
+    # Check if this is a reply to a bot message (for quick delete)
+    original_msg_sid = request.form.get("OriginalRepliedMessageSid")
+
     # Text messages — detect intent first
     try:
         intent_data = detect_intent(incoming_msg)
@@ -264,18 +269,39 @@ def webhook():
 
         # DELETE
         if intent == "delete":
-            cal_event = find_event_on_calendar(
-                title=intent_data.get("search_title"),
-                date_str=intent_data.get("search_date")
-            )
-            if cal_event:
-                event_id = cal_event["id"]
-                title = cal_event.get("summary", "Event")
-                raw_date = cal_event["start"].get("date") or cal_event["start"].get("dateTime", "")[:10]
-                delete_calendar_event(event_id)
-                resp.message(f"🗑️ Deleted *{title}* ({format_date(raw_date)}) from your calendar!")
+            # If replying to a bot message, try to use the mapped event ID first
+            event_id = None
+            if original_msg_sid and original_msg_sid in message_event_map:
+                event_id = message_event_map[original_msg_sid]
+                print(f"Found event from reply mapping: {event_id}")
+            elif sender in user_last_event and not intent_data.get("search_title") and not intent_data.get("search_date"):
+                event_id = user_last_event[sender]
+                print(f"Found event from last event: {event_id}")
+
+            if event_id:
+                try:
+                    service = get_calendar_service()
+                    cal_event = service.events().get(calendarId="primary", eventId=event_id).execute()
+                    title = cal_event.get("summary", "Event")
+                    raw_date = cal_event["start"].get("date") or cal_event["start"].get("dateTime", "")[:10]
+                    delete_calendar_event(event_id)
+                    resp.message(f"🗑️ Deleted *{title}* ({format_date(raw_date)}) from your calendar!")
+                except Exception as e:
+                    print(f"Error deleting mapped event: {e}")
+                    resp.message("That event may have already been deleted or can't be found.")
             else:
-                resp.message("Couldn't find that event in your calendar. Can you be more specific?")
+                cal_event = find_event_on_calendar(
+                    title=intent_data.get("search_title"),
+                    date_str=intent_data.get("search_date")
+                )
+                if cal_event:
+                    event_id = cal_event["id"]
+                    title = cal_event.get("summary", "Event")
+                    raw_date = cal_event["start"].get("date") or cal_event["start"].get("dateTime", "")[:10]
+                    delete_calendar_event(event_id)
+                    resp.message(f"🗑️ Deleted *{title}* ({format_date(raw_date)}) from your calendar!")
+                else:
+                    resp.message("Couldn't find that event in your calendar. Can you be more specific?")
 
         # UPDATE
         elif intent == "update":
