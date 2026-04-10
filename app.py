@@ -25,6 +25,7 @@ def format_date(date_str):
 
 def get_calendar_service():
     token_b64 = os.environ.get("GOOGLE_TOKEN")
+    print(f"Token b64 length: {len(token_b64) if token_b64 else 'MISSING'}")
     token_bytes = base64.b64decode(token_b64)
     creds = pickle.loads(token_bytes)
     if creds.expired and creds.refresh_token:
