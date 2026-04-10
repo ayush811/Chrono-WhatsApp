@@ -3,6 +3,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
+from zoneinfo import ZoneInfo
 import requests
 import os
 import json
@@ -19,6 +20,9 @@ TIMEZONE = "America/Indiana/Indianapolis"
 user_last_event = {}
 message_event_map = {}
 event_details_map = {}
+
+def today_local():
+    return datetime.now(ZoneInfo("America/Indiana/Indianapolis")).strftime("%Y-%m-%d")
 
 def format_date(date_str):
     return datetime.strptime(date_str, "%Y-%m-%d").strftime("%d %b %Y")
@@ -71,12 +75,18 @@ def find_event_on_calendar(title=None, date_str=None):
         kwargs["q"] = title
     results = service.events().list(**kwargs).execute()
     items = results.get("items", [])
-    # Skip birthday and other special event types that can't be modified/deleted
-    items = [e for e in items if e.get("eventType", "default") == "default"]
     return items[0] if items else None
 
+def gemini_request(body):
+    response = requests.post(GEMINI_URL, json=body)
+    response_json = response.json()
+    if "error" in response_json or "candidates" not in response_json:
+        print(f"Gemini error: {response_json}")
+        raise Exception(f"Gemini API error: {response_json.get('error', {}).get('message', 'Unknown')}")
+    return response_json["candidates"][0]["content"]["parts"][0]["text"]
+
 def detect_intent(message):
-    today = date.today().strftime("%Y-%m-%d")
+    today = today_local()
     prompt = f"""
     Today's date is {today}.
 
@@ -109,8 +119,7 @@ def detect_intent(message):
     Message: {message}
     """
     body = {"contents": [{"parts": [{"text": prompt}]}]}
-    response = requests.post(GEMINI_URL, json=body)
-    raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    raw = gemini_request(body)
     raw = raw.strip().replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(raw)
@@ -119,7 +128,7 @@ def detect_intent(message):
         return {"intent": "none"}
 
 def parse_event(message):
-    today = date.today().strftime("%Y-%m-%d")
+    today = today_local()
     prompt = f"""
     Today's date is {today}. Use this to resolve relative dates like "tomorrow", "next Friday", "this weekend" etc.
     If no month is specified, assume the current month and year.
@@ -137,10 +146,8 @@ def parse_event(message):
     Message: {message}
     """
     body = {"contents": [{"parts": [{"text": prompt}]}]}
-    response = requests.post(GEMINI_URL, json=body)
-    print(f"Gemini status: {response.status_code}")
-    print(f"Gemini response: {response.text}")
-    raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    raw = gemini_request(body)
+    print(f"Gemini parse response: {raw}")
     raw = raw.strip().replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(raw)
@@ -154,7 +161,7 @@ def parse_events_from_image(image_url):
     image_response = requests.get(image_url, auth=(account_sid, auth_token))
     image_base64 = base64.b64encode(image_response.content).decode("utf-8")
     mime_type = image_response.headers.get("Content-Type", "image/jpeg")
-    today = date.today().strftime("%Y-%m-%d")
+    today = today_local()
     prompt = f"""
     Today's date is {today}.
     If no year is specified, assume the current year.
@@ -172,10 +179,8 @@ def parse_events_from_image(image_url):
     Return ONLY the JSON array, no other text.
     """
     body = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": image_base64}}]}]}
-    response = requests.post(GEMINI_URL, json=body)
-    print(f"Gemini image status: {response.status_code}")
-    print(f"Gemini image response: {response.text}")
-    raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    raw = gemini_request(body)
+    print(f"Gemini image response: {raw}")
     raw = raw.strip().replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(raw)
@@ -210,7 +215,6 @@ def webhook():
                 resp.message("That image doesn't seem to have any event details!")
                 return str(resp)
 
-            # If caption exists, filter events based on it
             if caption:
                 titles = [e.get("title", "") for e in events]
                 filter_prompt = f"""
@@ -220,16 +224,15 @@ def webhook():
                 If they want all events, return all titles.
                 Example: ["Ramen Bowl", "Chicken and Waffles"]
                 """
-                body = {"contents": [{"parts": [{"text": filter_prompt}]}]}
-                filter_response = requests.post(GEMINI_URL, json=body)
-                raw = filter_response.json()["candidates"][0]["content"]["parts"][0]["text"]
-                raw = raw.strip().replace("```json", "").replace("```", "").strip()
+                filter_body = {"contents": [{"parts": [{"text": filter_prompt}]}]}
                 try:
-                    keep_titles = json.loads(raw)
+                    filter_raw = gemini_request(filter_body)
+                    filter_raw = filter_raw.strip().replace("```json", "").replace("```", "").strip()
+                    keep_titles = json.loads(filter_raw)
                     keep_titles_lower = [t.lower() for t in keep_titles]
                     events = [e for e in events if e.get("title", "").lower() in keep_titles_lower]
-                except json.JSONDecodeError:
-                    pass
+                except Exception as e:
+                    print(f"Filter error: {e}")
 
             blocks = []
             last_event_id = None
@@ -259,9 +262,6 @@ def webhook():
             print(f"Error: {e}")
         return str(resp)
 
-    # Check if this is a reply to a bot message (for quick delete)
-    original_msg_sid = request.form.get("OriginalRepliedMessageSid")
-
     # Text messages — detect intent first
     try:
         intent_data = detect_intent(incoming_msg)
@@ -270,39 +270,18 @@ def webhook():
 
         # DELETE
         if intent == "delete":
-            # If replying to a bot message, try to use the mapped event ID first
-            event_id = None
-            if original_msg_sid and original_msg_sid in message_event_map:
-                event_id = message_event_map[original_msg_sid]
-                print(f"Found event from reply mapping: {event_id}")
-            elif sender in user_last_event and not intent_data.get("search_title") and not intent_data.get("search_date"):
-                event_id = user_last_event[sender]
-                print(f"Found event from last event: {event_id}")
-
-            if event_id:
-                try:
-                    service = get_calendar_service()
-                    cal_event = service.events().get(calendarId="primary", eventId=event_id).execute()
-                    title = cal_event.get("summary", "Event")
-                    raw_date = cal_event["start"].get("date") or cal_event["start"].get("dateTime", "")[:10]
-                    delete_calendar_event(event_id)
-                    resp.message(f"🗑️ Deleted *{title}* ({format_date(raw_date)}) from your calendar!")
-                except Exception as e:
-                    print(f"Error deleting mapped event: {e}")
-                    resp.message("That event may have already been deleted or can't be found.")
+            cal_event = find_event_on_calendar(
+                title=intent_data.get("search_title"),
+                date_str=intent_data.get("search_date")
+            )
+            if cal_event:
+                event_id = cal_event["id"]
+                title = cal_event.get("summary", "Event")
+                raw_date = cal_event["start"].get("date") or cal_event["start"].get("dateTime", "")[:10]
+                delete_calendar_event(event_id)
+                resp.message(f"🗑️ Deleted *{title}* ({format_date(raw_date)}) from your calendar!")
             else:
-                cal_event = find_event_on_calendar(
-                    title=intent_data.get("search_title"),
-                    date_str=intent_data.get("search_date")
-                )
-                if cal_event:
-                    event_id = cal_event["id"]
-                    title = cal_event.get("summary", "Event")
-                    raw_date = cal_event["start"].get("date") or cal_event["start"].get("dateTime", "")[:10]
-                    delete_calendar_event(event_id)
-                    resp.message(f"🗑️ Deleted *{title}* ({format_date(raw_date)}) from your calendar!")
-                else:
-                    resp.message("Couldn't find that event in your calendar. Can you be more specific?")
+                resp.message("Couldn't find that event in your calendar. Can you be more specific?")
 
         # UPDATE
         elif intent == "update":
